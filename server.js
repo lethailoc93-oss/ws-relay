@@ -323,14 +323,8 @@ wss.on('connection', (ws, req) => {
         console.error(`⚠️ [${code}] Client ${clientId} error:`, err.message);
     });
 
-    // Send welcome with server capabilities
-    ws.send(JSON.stringify({
-        event_type: 'server_info',
-        version: '2.0.0',
-        capabilities: ['batch', 'compression', 'role_pairing'],
-        assigned_role: role || 'pending',
-        client_id: clientId
-    }));
+    // NOTE: server_info removed — proxy apps (AI Studio) crash on unexpected messages.
+    // Capabilities can be checked via /health endpoint instead.
 });
 
 // ── Graceful Shutdown ───────────────────────────
