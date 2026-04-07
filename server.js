@@ -1,5 +1,5 @@
 // ================================================
-// WebSocket Relay Server v2.0 — Optimized Cloud Deploy
+// WebSocket Relay Server v2.1 — Mobile Resilience — Optimized Cloud Deploy
 // Routes messages between VietTruyen App ↔ Gemini Browser Proxy
 // Improvements: role-based pairing, compression, chunk batching,
 //               smart keepalive, message limits, metrics
@@ -24,6 +24,7 @@ const metrics = {
     bytesRelayed: 0,
     connectionsTotal: 0,
     batchesSent: 0,
+    heartbeatsReceived: 0,
     startedAt: Date.now()
 };
 
@@ -117,6 +118,8 @@ class ChunkBatcher {
 function detectRoleFromMessage(msg) {
     try {
         const parsed = JSON.parse(msg);
+        // Skip heartbeat/ping for role detection
+        if (parsed.event_type === 'heartbeat' || parsed.event_type === 'ping') return null;
         // App sends: { request_id, method, path, headers, body }
         if (parsed.request_id && parsed.method && parsed.path) return 'app';
         // Proxy sends: { request_id, event_type: 'chunk'|'response_headers'|'stream_close'|'error' }
@@ -145,7 +148,7 @@ const httpServer = createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             status: 'ok',
-            version: '2.0.0',
+            version: '2.1.0',
             uptime,
             rooms: rooms.size,
             connections: totalClients,
@@ -153,6 +156,7 @@ const httpServer = createServer((req, res) => {
                 messagesRelayed: metrics.messagesRelayed,
                 bytesRelayed: metrics.bytesRelayed,
                 batchesSent: metrics.batchesSent,
+                heartbeatsReceived: metrics.heartbeatsReceived,
                 connectionsTotal: metrics.connectionsTotal,
                 uptimeHours: ((Date.now() - metrics.startedAt) / 3600000).toFixed(1)
             },
@@ -218,6 +222,18 @@ wss.on('connection', (ws, req) => {
     // ── Message Handler ────────────────────────
     ws.on('message', (data) => {
         const msg = data.toString();
+
+        // ── Handle client heartbeat/ping (mobile keep-alive) ──
+        try {
+            const parsed = JSON.parse(msg);
+            if (parsed.event_type === 'heartbeat' || parsed.event_type === 'ping') {
+                metrics.heartbeatsReceived++;
+                if (ws.readyState === 1) {
+                    ws.send(JSON.stringify({ event_type: 'pong', ts: Date.now() }));
+                }
+                return; // Don't route heartbeat to other clients
+            }
+        } catch { /* not JSON */ }
 
         // Size warning
         if (msg.length > 1_000_000) {
@@ -346,7 +362,7 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // ── Start ───────────────────────────────────────
 httpServer.listen(PORT, () => {
-    console.log(`🔌 WS Relay Server v2.0.0 running on port ${PORT}`);
+    console.log(`🔌 WS Relay Server v2.1.0 running on port ${PORT}`);
     console.log(`   Health check: http://localhost:${PORT}/health`);
     console.log(`   Features: role-pairing, compression, chunk-batching, smart-keepalive`);
     console.log(`   Max message: ${MAX_MESSAGE_SIZE / 1024 / 1024}MB | Ping: ${PING_INTERVAL_MS / 1000}s`);
