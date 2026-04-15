@@ -128,11 +128,70 @@ function detectRoleFromMessage(msg) {
     return null;
 }
 
+// ── HTTP-to-WS Bridge ───────────────────────────
+// Pending HTTP requests waiting for proxy response
+// Map<request_id, { res, status, headersSent, timer }>
+const httpBridgeRequests = new Map();
+
+/**
+ * Handle proxy response message for HTTP bridge requests.
+ * Called from the WS message handler when a response targets a bridge request.
+ */
+function handleBridgeResponse(msg) {
+    const pending = httpBridgeRequests.get(msg.request_id);
+    if (!pending) return false;
+
+    switch (msg.event_type) {
+        case 'response_headers':
+            pending.status = msg.status || 200;
+            pending.respHeaders = msg.headers || {};
+            return true;
+
+        case 'chunk':
+            if (!pending.headersSent) {
+                pending.headersSent = true;
+                pending.res.writeHead(pending.status || 200, {
+                    'Content-Type': pending.respHeaders?.['content-type'] || 'application/json',
+                    'Transfer-Encoding': 'chunked',
+                    'Access-Control-Allow-Origin': '*',
+                });
+            }
+            pending.res.write(msg.data);
+            return true;
+
+        case 'stream_close':
+            if (!pending.headersSent) {
+                pending.res.writeHead(pending.status || 200, {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                });
+            }
+            pending.res.end();
+            clearTimeout(pending.timer);
+            httpBridgeRequests.delete(msg.request_id);
+            return true;
+
+        case 'error':
+            if (!pending.headersSent) {
+                pending.res.writeHead(msg.status || 500, {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                });
+            }
+            pending.res.end(JSON.stringify({ error: { message: msg.message, code: msg.status } }));
+            clearTimeout(pending.timer);
+            httpBridgeRequests.delete(msg.request_id);
+            return true;
+    }
+    return false;
+}
+
 // ── HTTP Server ─────────────────────────────────
 const httpServer = createServer((req, res) => {
-    // CORS headers for health checks
+    // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
 
     if (req.method === 'OPTIONS') {
         res.writeHead(204);
@@ -148,10 +207,11 @@ const httpServer = createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             status: 'ok',
-            version: '2.2.0',
+            version: '2.3.0',
             uptime,
             rooms: rooms.size,
             connections: totalClients,
+            httpBridge: { active: httpBridgeRequests.size },
             metrics: {
                 messagesRelayed: metrics.messagesRelayed,
                 bytesRelayed: metrics.bytesRelayed,
@@ -165,7 +225,7 @@ const httpServer = createServer((req, res) => {
         return;
     }
 
-    // Room status check: /status/ROOM_CODE — returns proxy availability
+    // Room status check: /status/ROOM_CODE
     const statusMatch = req.url.match(/^\/status\/([a-zA-Z0-9_-]+)/);
     if (statusMatch) {
         const code = statusMatch[1];
@@ -181,6 +241,98 @@ const httpServer = createServer((req, res) => {
             apps: appCount,
             status: proxyCount > 0 ? 'ready' : 'no_proxy'
         }));
+        return;
+    }
+
+    // ═══════════════════════════════════════════════
+    // HTTP Bridge: /api/ROOM_CODE/any/api/path
+    // Forwards HTTP request → proxy via WS → streams response back
+    // Usage: SillyTavern → https://relay-url/api/ROOM_CODE/v1beta/models/...
+    // ═══════════════════════════════════════════════
+    const apiMatch = req.url.match(/^\/api\/([a-zA-Z0-9_-]+)(\/.*)/);
+    if (apiMatch) {
+        const roomCode = apiMatch[1];
+        const apiPath = apiMatch[2]; // e.g., /v1beta/models/gemini-2.0-flash:generateContent
+
+        // Check room & proxy
+        const room = rooms.get(roomCode);
+        const proxies = room ? [...room.proxy].filter(ws => ws.readyState === 1) : [];
+        if (proxies.length === 0) {
+            res.writeHead(503, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+            res.end(JSON.stringify({
+                error: {
+                    message: `No proxy connected in room "${roomCode}". Open AI Studio Proxy App first.`,
+                    code: 503
+                }
+            }));
+            return;
+        }
+
+        // Collect request body
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            const requestId = `bridge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+            // Parse URL for query params
+            const urlObj = new URL(req.url, `http://localhost:${PORT}`);
+            const queryParams = {};
+            urlObj.searchParams.forEach((v, k) => queryParams[k] = v);
+
+            // Clean headers
+            const headers = {};
+            for (const [k, v] of Object.entries(req.headers)) {
+                if (!['host', 'connection', 'content-length', 'transfer-encoding'].includes(k.toLowerCase())) {
+                    headers[k] = v;
+                }
+            }
+
+            // Build request spec (same format as WS app sends)
+            const requestSpec = {
+                request_id: requestId,
+                method: req.method,
+                path: apiPath,
+                headers,
+                body: body || null,
+                query_params: queryParams,
+            };
+
+            // Register pending response
+            const timer = setTimeout(() => {
+                if (httpBridgeRequests.has(requestId)) {
+                    const p = httpBridgeRequests.get(requestId);
+                    if (!p.headersSent) {
+                        p.res.writeHead(504, { 'Content-Type': 'application/json' });
+                    }
+                    p.res.end(JSON.stringify({ error: { message: 'Request timeout (5 min)', code: 504 } }));
+                    httpBridgeRequests.delete(requestId);
+                }
+            }, 5 * 60 * 1000);
+
+            httpBridgeRequests.set(requestId, {
+                res,
+                status: 200,
+                respHeaders: {},
+                headersSent: false,
+                timer,
+            });
+
+            // Send to proxy (pick first available)
+            const proxy = proxies[0];
+            const msgStr = JSON.stringify(requestSpec);
+            proxy.send(msgStr);
+            metrics.messagesRelayed++;
+            metrics.bytesRelayed += msgStr.length;
+
+            console.log(`[HTTP Bridge] ${requestId} → ${req.method} ${apiPath} (room: ${roomCode})`);
+        });
+
+        // Handle client disconnect
+        req.on('close', () => {
+            if (httpBridgeRequests.has(`bridge-req-abort`)) {
+                // Client disconnected before response
+            }
+        });
         return;
     }
 
@@ -314,6 +466,12 @@ wss.on('connection', (ws, req) => {
             try {
                 const parsed = JSON.parse(msg);
                 isChunk = parsed.event_type === 'chunk';
+
+                // Route bridge responses to HTTP handler (not WS apps)
+                if (parsed.request_id && parsed.request_id.startsWith('bridge-')) {
+                    handleBridgeResponse(parsed);
+                    return; // Don't forward to WS app clients
+                }
             } catch { /* not json */ }
         }
 
