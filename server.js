@@ -148,7 +148,7 @@ const httpServer = createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             status: 'ok',
-            version: '2.1.0',
+            version: '2.2.0',
             uptime,
             rooms: rooms.size,
             connections: totalClients,
@@ -161,6 +161,25 @@ const httpServer = createServer((req, res) => {
                 uptimeHours: ((Date.now() - metrics.startedAt) / 3600000).toFixed(1)
             },
             roomDetails: roomStats
+        }));
+        return;
+    }
+
+    // Room status check: /status/ROOM_CODE — returns proxy availability
+    const statusMatch = req.url.match(/^\/status\/([a-zA-Z0-9_-]+)/);
+    if (statusMatch) {
+        const code = statusMatch[1];
+        const room = rooms.get(code);
+        const proxyCount = room ? [...room.proxy].filter(ws => ws.readyState === 1).length : 0;
+        const appCount = room ? [...room.app].filter(ws => ws.readyState === 1).length : 0;
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            code,
+            proxyConnected: proxyCount > 0,
+            proxies: proxyCount,
+            apps: appCount,
+            status: proxyCount > 0 ? 'ready' : 'no_proxy'
         }));
         return;
     }
@@ -270,6 +289,25 @@ wss.on('connection', (ws, req) => {
             targets.delete(ws);
         }
 
+        // ── No target available: send error back ────
+        // When app sends request but no proxy is connected → reply with error
+        // so the client doesn't hang indefinitely waiting for a response
+        if (role === 'app' && targets.size === 0) {
+            try {
+                const parsed = JSON.parse(msg);
+                if (parsed.request_id) {
+                    const errMsg = JSON.stringify({
+                        request_id: parsed.request_id,
+                        event_type: 'error',
+                        status: 503,
+                        message: 'No proxy connected. Hãy mở AI Studio Proxy App và kiểm tra kết nối.'
+                    });
+                    ws.send(errMsg);
+                    console.log(`⚠️ [${code}] No proxy available for request ${parsed.request_id.slice(0, 8)} from ${clientId}`);
+                }
+            } catch { /* not a request, ignore */ }
+        }
+
         // Check if this is a streamable chunk (proxy → app direction, chunk event)
         let isChunk = false;
         if (role === 'proxy') {
@@ -279,8 +317,11 @@ wss.on('connection', (ws, req) => {
             } catch { /* not json */ }
         }
 
+        // Count alive targets for routing
+        let aliveTargets = 0;
         for (const target of targets) {
             if (target === ws || target.readyState !== 1) continue;
+            aliveTargets++;
 
             if (isChunk) {
                 // Batch chunks for efficiency
@@ -294,6 +335,23 @@ wss.on('connection', (ws, req) => {
                 metrics.messagesRelayed++;
                 metrics.bytesRelayed += msg.length;
             }
+        }
+
+        // Edge case: targets exist but none are alive (stale connections)
+        if (role === 'app' && targets.size > 0 && aliveTargets === 0) {
+            try {
+                const parsed = JSON.parse(msg);
+                if (parsed.request_id) {
+                    const errMsg = JSON.stringify({
+                        request_id: parsed.request_id,
+                        event_type: 'error',
+                        status: 503,
+                        message: 'Proxy đang offline hoặc mất kết nối. Hãy mở lại AI Studio Proxy App.'
+                    });
+                    ws.send(errMsg);
+                    console.log(`⚠️ [${code}] All proxies dead for request ${parsed.request_id.slice(0, 8)} from ${clientId}`);
+                }
+            } catch { /* ignore */ }
         }
     });
 
