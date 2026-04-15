@@ -287,11 +287,25 @@ const httpServer = createServer((req, res) => {
                 }
             }
 
+            // ── Path rewriting: OpenAI → Gemini ──
+            // SillyTavern sends OpenAI-format paths, Gemini API uses different paths
+            // /v1/chat/completions      → /v1beta/openai/chat/completions
+            // /v1/models                → /v1beta/openai/models
+            // /chat/completions         → /v1beta/openai/chat/completions
+            // /models                   → /v1beta/openai/models
+            // /v1beta/... paths pass through unchanged (already Gemini-native)
+            let finalPath = apiPath;
+            if (!finalPath.startsWith('/v1beta/')) {
+                // Strip /v1 prefix if present
+                const stripped = finalPath.replace(/^\/v1\//, '/');
+                finalPath = '/v1beta/openai' + stripped;
+            }
+
             // Build request spec (same format as WS app sends)
             const requestSpec = {
                 request_id: requestId,
                 method: req.method,
-                path: apiPath,
+                path: finalPath,
                 headers,
                 body: body || null,
                 query_params: queryParams,
@@ -324,7 +338,7 @@ const httpServer = createServer((req, res) => {
             metrics.messagesRelayed++;
             metrics.bytesRelayed += msgStr.length;
 
-            console.log(`[HTTP Bridge] ${requestId} → ${req.method} ${apiPath} (room: ${roomCode})`);
+            console.log(`[HTTP Bridge] ${requestId} → ${req.method} ${finalPath}${finalPath !== apiPath ? ` (rewritten from ${apiPath})` : ''} (room: ${roomCode})`);
         });
 
         // Handle client disconnect
