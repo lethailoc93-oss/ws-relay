@@ -302,13 +302,41 @@ const httpServer = createServer((req, res) => {
                 finalPath = '/v1beta/openai' + stripped;
             }
 
+            // ── Clean request body for Gemini OpenAI compatibility ──
+            // SillyTavern sends OpenAI params that Gemini doesn't support
+            let cleanBody = body || null;
+            if (cleanBody && finalPath.includes('/chat/completions')) {
+                try {
+                    const parsed = JSON.parse(cleanBody);
+                    // Remove unsupported OpenAI parameters
+                    const unsupported = [
+                        'logit_bias', 'logprobs', 'top_logprobs',
+                        'user', 'service_tier', 'store',
+                        'frequency_penalty', 'presence_penalty',
+                        'seed', 'tools', 'tool_choice',
+                        'response_format', 'extra_body',
+                        'n', 'suffix'
+                    ];
+                    for (const key of unsupported) {
+                        delete parsed[key];
+                    }
+                    // Gemini uses max_completion_tokens, but also accepts max_tokens
+                    // Just ensure we don't have both
+                    if (parsed.max_completion_tokens && parsed.max_tokens) {
+                        delete parsed.max_tokens;
+                    }
+                    cleanBody = JSON.stringify(parsed);
+                    console.log(`[Bridge] Cleaned body: model=${parsed.model} stream=${parsed.stream} messages=${parsed.messages?.length}`);
+                } catch { /* keep original body */ }
+            }
+
             // Build request spec (same format as WS app sends)
             const requestSpec = {
                 request_id: requestId,
                 method: req.method,
                 path: finalPath,
                 headers,
-                body: body || null,
+                body: cleanBody,
                 query_params: queryParams,
             };
 
