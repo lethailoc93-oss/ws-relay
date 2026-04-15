@@ -1,10 +1,13 @@
 // ================================================
-// WebSocket Relay Server v2.1 — Mobile Resilience — Optimized Cloud Deploy
+// WebSocket Relay Server v2.4 — Enhanced AI Processing
 // Routes messages between VietTruyen App ↔ Gemini Browser Proxy
-// Improvements: role-based pairing, compression, chunk batching,
-//               smart keepalive, message limits, metrics
+// Features: role-based pairing, compression, chunk batching,
+//           smart keepalive, message limits, metrics,
+//           empty-return fix, thinking budget, google search toggle,
+//           round-robin proxy, client disconnect cleanup
 // Deploy: Render.com (Free Tier optimized)
 // ================================================
+import { randomBytes } from 'crypto';
 
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
@@ -17,6 +20,9 @@ const PONG_TIMEOUT_MS = 10_000;        // 10s to reply pong before considered de
 const MAX_MESSAGE_SIZE = 5 * 1024 * 1024; // 5MB max message
 const BATCH_WINDOW_MS = 30;            // batch chunks within 30ms window
 const ROOM_CODE_REGEX = /^[a-zA-Z0-9_\-]{1,64}$/;
+
+// ── AI Processing Config ────────────────────────
+const EMPTY_RETURN_FIX_ENABLED = (process.env.EMPTY_RETURN_FIX ?? 'true') !== 'false';
 
 // ── Metrics ─────────────────────────────────────
 const metrics = {
@@ -128,6 +134,157 @@ function detectRoleFromMessage(msg) {
     return null;
 }
 
+// ── AI Request Processing ───────────────────────
+// Generate random 64-char hex string for empty-return fix
+function rand64() {
+    return randomBytes(32).toString('hex');
+}
+
+// Normalize role names: assistant/model → model, user → user
+function normRole(r) {
+    if (r === 'assistant' || r === 'model') return 'model';
+    if (r === 'user') return 'user';
+    return r || '';
+}
+
+/**
+ * Empty Return Fix — Prevents Gemini from returning empty responses.
+ * When conversation history ends with assistant/model role, Gemini may
+ * interpret it as "continue from here" and return empty. This fix injects
+ * dummy assistant messages to break that pattern.
+ * Extracted from build-反代 research (index.js:154-182).
+ */
+function applyEmptyReturnFix(rawMessages) {
+    const msgs = Array.isArray(rawMessages) ? [...rawMessages] : [];
+    if (msgs.length === 0) return msgs;
+
+    const lastIdx = msgs.length - 1;
+    const last = msgs[lastIdx];
+    const lastRole = normRole(last.role);
+    const prev = msgs[lastIdx - 1];
+    const prevRole = prev ? normRole(prev.role) : '';
+
+    if (lastRole === 'model') {
+        if (prevRole !== 'model') {
+            msgs.splice(lastIdx, 0, { role: 'assistant', content: rand64() });
+        }
+        return msgs;
+    }
+
+    if (lastRole === 'user') {
+        msgs[lastIdx] = { ...last, role: 'assistant' };
+        const newPrev = msgs[lastIdx - 1];
+        const newPrevRole = newPrev ? normRole(newPrev.role) : '';
+        if (newPrevRole !== 'model') {
+            msgs.splice(lastIdx, 0, { role: 'assistant', content: rand64() });
+        }
+        return msgs;
+    }
+
+    return msgs;
+}
+
+/**
+ * Parse thinking budget from request headers or query params.
+ * Supports: x-thinking-budget header, thinking_budget query param.
+ * Returns null if not specified, or a validated integer [0, 32768].
+ */
+function parseThinkingBudget(headers, queryParams) {
+    const raw = headers['x-thinking-budget'] || queryParams.thinking_budget;
+    if (raw == null) return null;
+    const num = parseInt(raw, 10);
+    if (isNaN(num) || num < 0) return null;
+    return Math.min(num, 32768);
+}
+
+/**
+ * Parse Google Search toggle from request headers or query params.
+ * Supports: x-google-search header, google_search query param.
+ * Returns true/false/null.
+ */
+function parseGoogleSearch(headers, queryParams) {
+    const raw = headers['x-google-search'] || queryParams.google_search;
+    if (raw == null) return null;
+    const val = String(raw).trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(val)) return true;
+    if (['0', 'false', 'no', 'off'].includes(val)) return false;
+    return null;
+}
+
+/**
+ * Apply AI processing enhancements to the request body.
+ * - Empty return fix for /chat/completions
+ * - Thinking budget injection for Gemini-native paths
+ * - Google Search tool injection
+ */
+function processRequestBody(body, finalPath, headers, queryParams) {
+    if (!body) return body;
+
+    try {
+        const parsed = JSON.parse(body);
+        let modified = false;
+
+        // ── Empty Return Fix ──
+        if (EMPTY_RETURN_FIX_ENABLED && finalPath.includes('/chat/completions') && Array.isArray(parsed.messages)) {
+            const fixed = applyEmptyReturnFix(parsed.messages);
+            if (fixed.length !== parsed.messages.length) {
+                parsed.messages = fixed;
+                modified = true;
+                console.log(`[AI Process] Empty return fix applied: ${parsed.messages.length} → ${fixed.length} messages`);
+            }
+        }
+
+        // ── Thinking Budget ──
+        const thinkingBudget = parseThinkingBudget(headers, queryParams);
+        if (thinkingBudget != null) {
+            // For Gemini-native paths, inject thinkingConfig
+            if (finalPath.includes(':generateContent') || finalPath.includes(':streamGenerateContent')) {
+                if (!parsed.generationConfig) parsed.generationConfig = {};
+                parsed.generationConfig.thinkingConfig = {
+                    thinkingBudget: thinkingBudget,
+                    includeThoughts: true
+                };
+                modified = true;
+            }
+            // For OpenAI-compat, Gemini handles it natively via extra_body
+            console.log(`[AI Process] Thinking budget set: ${thinkingBudget}`);
+        }
+
+        // ── Google Search Toggle ──
+        const googleSearch = parseGoogleSearch(headers, queryParams);
+        if (googleSearch === true) {
+            // For Gemini-native paths
+            if (finalPath.includes(':generateContent') || finalPath.includes(':streamGenerateContent')) {
+                if (!Array.isArray(parsed.tools)) parsed.tools = [];
+                const hasSearch = parsed.tools.some(t => t && t.googleSearch);
+                if (!hasSearch) {
+                    parsed.tools.push({ googleSearch: {} });
+                    modified = true;
+                }
+            }
+            console.log(`[AI Process] Google Search enabled`);
+        }
+
+        if (modified) return JSON.stringify(parsed);
+    } catch { /* not JSON or parse error — return original */ }
+
+    return body;
+}
+
+// ── Proxy Selection (Round-Robin) ───────────────
+// Track last-used proxy index per room for fair distribution
+const proxyRoundRobin = new Map();
+
+function selectProxy(roomCode, proxies) {
+    if (proxies.length === 0) return null;
+    if (proxies.length === 1) return proxies[0];
+
+    const lastIdx = proxyRoundRobin.get(roomCode) || 0;
+    const nextIdx = (lastIdx + 1) % proxies.length;
+    proxyRoundRobin.set(roomCode, nextIdx);
+    return proxies[nextIdx];
+}
+
 // ── HTTP-to-WS Bridge ───────────────────────────
 // Pending HTTP requests waiting for proxy response
 // Map<request_id, { res, status, headersSent, timer }>
@@ -208,7 +365,7 @@ const httpServer = createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             status: 'ok',
-            version: '2.3.0',
+            version: '2.4.0',
             uptime,
             rooms: rooms.size,
             connections: totalClients,
@@ -330,6 +487,10 @@ const httpServer = createServer((req, res) => {
                 } catch { /* keep original body */ }
             }
 
+            // ── AI Processing Enhancements ──
+            // Apply empty-return fix, thinking budget, google search
+            cleanBody = processRequestBody(cleanBody, finalPath, headers, queryParams);
+
             // Build request spec (same format as WS app sends)
             const requestSpec = {
                 request_id: requestId,
@@ -360,8 +521,8 @@ const httpServer = createServer((req, res) => {
                 timer,
             });
 
-            // Send to proxy (pick first available)
-            const proxy = proxies[0];
+            // Send to proxy (round-robin selection)
+            const proxy = selectProxy(roomCode, proxies);
             const msgStr = JSON.stringify(requestSpec);
             proxy.send(msgStr);
             metrics.messagesRelayed++;
@@ -370,10 +531,16 @@ const httpServer = createServer((req, res) => {
             console.log(`[HTTP Bridge] ${requestId} → ${req.method} ${finalPath}${finalPath !== apiPath ? ` (rewritten from ${apiPath})` : ''} (room: ${roomCode}) | pending=${httpBridgeRequests.size}`);
         });
 
-        // Handle client disconnect
+        // Handle client disconnect — clean up pending request
         req.on('close', () => {
-            if (httpBridgeRequests.has(`bridge-req-abort`)) {
-                // Client disconnected before response
+            // Find and cleanup the pending request for this response
+            for (const [reqId, pending] of httpBridgeRequests) {
+                if (pending.res === res && !pending.headersSent) {
+                    clearTimeout(pending.timer);
+                    httpBridgeRequests.delete(reqId);
+                    console.log(`[HTTP Bridge] Client disconnected, cleaned up ${reqId.slice(0, 20)}`);
+                    break;
+                }
             }
         });
         return;
@@ -622,8 +789,8 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // ── Start ───────────────────────────────────────
 httpServer.listen(PORT, () => {
-    console.log(`🔌 WS Relay Server v2.1.0 running on port ${PORT}`);
+    console.log(`🔌 WS Relay Server v2.4.0 running on port ${PORT}`);
     console.log(`   Health check: http://localhost:${PORT}/health`);
-    console.log(`   Features: role-pairing, compression, chunk-batching, smart-keepalive`);
+    console.log(`   Features: role-pairing, compression, chunk-batching, smart-keepalive, empty-return-fix, thinking-budget, google-search`);
     console.log(`   Max message: ${MAX_MESSAGE_SIZE / 1024 / 1024}MB | Ping: ${PING_INTERVAL_MS / 1000}s`);
 });
