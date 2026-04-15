@@ -139,6 +139,7 @@ const httpBridgeRequests = new Map();
  */
 function handleBridgeResponse(msg) {
     const pending = httpBridgeRequests.get(msg.request_id);
+    console.log(`[Bridge Response] ${msg.request_id?.slice(0,20)} event=${msg.event_type} found=${!!pending} pending_count=${httpBridgeRequests.size}`);
     if (!pending) return false;
 
     switch (msg.event_type) {
@@ -338,7 +339,7 @@ const httpServer = createServer((req, res) => {
             metrics.messagesRelayed++;
             metrics.bytesRelayed += msgStr.length;
 
-            console.log(`[HTTP Bridge] ${requestId} → ${req.method} ${finalPath}${finalPath !== apiPath ? ` (rewritten from ${apiPath})` : ''} (room: ${roomCode})`);
+            console.log(`[HTTP Bridge] ${requestId} → ${req.method} ${finalPath}${finalPath !== apiPath ? ` (rewritten from ${apiPath})` : ''} (room: ${roomCode}) | pending=${httpBridgeRequests.size}`);
         });
 
         // Handle client disconnect
@@ -483,6 +484,7 @@ wss.on('connection', (ws, req) => {
 
                 // Route bridge responses to HTTP handler (not WS apps)
                 if (parsed.request_id && parsed.request_id.startsWith('bridge-')) {
+                    console.log(`[Bridge Intercept] ${parsed.request_id.slice(0,20)} event=${parsed.event_type} data_len=${parsed.data?.length || 0}`);
                     handleBridgeResponse(parsed);
                     return; // Don't forward to WS app clients
                 }
