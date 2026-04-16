@@ -320,25 +320,26 @@ const httpServer = createServer((req, res) => {
             }
 
             // ── Clean request body for Gemini OpenAI compatibility ──
-            // SillyTavern sends OpenAI params that Gemini doesn't support
+            // SillyTavern sends extra params (min_p, repetition_penalty) that Gemini rejects
             let cleanBody = body || null;
             if (cleanBody && finalPath.includes('/chat/completions')) {
                 try {
                     const parsed = JSON.parse(cleanBody);
-                    // Remove unsupported OpenAI parameters
-                    const unsupported = [
-                        'logit_bias', 'logprobs', 'top_logprobs',
-                        'user', 'service_tier', 'store',
-                        'frequency_penalty', 'presence_penalty',
-                        'seed', 'tools', 'tool_choice',
-                        'response_format', 'extra_body',
-                        'n', 'suffix'
+                    const allowed = [
+                        'messages', 'model', 'temperature', 'top_p', 'top_k',
+                        'max_tokens', 'max_completion_tokens', 'stop', 'stream',
+                        'presence_penalty', 'frequency_penalty', 'response_format',
+                        'tools', 'tool_choice'
                     ];
-                    for (const key of unsupported) {
-                        delete parsed[key];
+                    
+                    // Strip any key not in allowed list
+                    for (const key of Object.keys(parsed)) {
+                        if (!allowed.includes(key)) {
+                            delete parsed[key];
+                        }
                     }
-                    // Gemini uses max_completion_tokens, but also accepts max_tokens
-                    // Just ensure we don't have both
+                    
+                    // Gemini prefers max_completion_tokens; remove duplicate
                     if (parsed.max_completion_tokens && parsed.max_tokens) {
                         delete parsed.max_tokens;
                     }

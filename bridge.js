@@ -224,17 +224,19 @@ const server = http.createServer((req, res) => {
     if (cleanBody && finalPath.includes('/chat/completions')) {
       try {
         const parsed = JSON.parse(cleanBody);
-        const unsupported = [
-          'logit_bias', 'logprobs', 'top_logprobs',
-          'user', 'service_tier', 'store',
-          'frequency_penalty', 'presence_penalty',
-          'seed', 'tools', 'tool_choice',
-          'response_format', 'extra_body',
-          'n', 'suffix'
+        const allowed = [
+            'messages', 'model', 'temperature', 'top_p', 'top_k',
+            'max_tokens', 'max_completion_tokens', 'stop', 'stream',
+            'presence_penalty', 'frequency_penalty', 'response_format',
+            'tools', 'tool_choice'
         ];
-        for (const key of unsupported) {
-          delete parsed[key];
+        
+        for (const key of Object.keys(parsed)) {
+            if (!allowed.includes(key)) {
+                delete parsed[key];
+            }
         }
+        
         if (parsed.max_completion_tokens && parsed.max_tokens) {
           delete parsed.max_tokens;
         }
