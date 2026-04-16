@@ -18,9 +18,9 @@
 //   2. Proxy App và Bridge dùng CÙNG room code
 // ================================================
 
-const http = require('http');
-const WebSocket = require('ws');
-const crypto = require('crypto');
+import http from 'http';
+import WebSocket from 'ws';
+import crypto from 'crypto';
 
 // ── Config ──────────────────────────────────────
 const PORT = parseInt(process.env.BRIDGE_PORT || '5001');
@@ -186,6 +186,7 @@ const server = http.createServer((req, res) => {
     delete headers['content-length'];
     delete headers['transfer-encoding'];
     delete headers['authorization'];
+    delete headers['x-goog-api-key'];
 
     // Parse URL and query params
     const urlObj = new URL(req.url, `http://localhost:${PORT}`);
@@ -203,11 +204,19 @@ const server = http.createServer((req, res) => {
     //   /v1/models            → /v1beta/openai/models
     // Mode 2 — Gemini native (Google AI Studio):
     //   /v1beta/... paths pass through unchanged
+    //   /models/...:streamGenerateContent → prepends /v1beta
     let finalPath = urlObj.pathname;
-    const isGeminiNative = finalPath.startsWith('/v1beta/');
-    if (!isGeminiNative) {
+    const isGeminiNative = finalPath.includes(':streamGenerateContent') 
+                        || finalPath.includes(':generateContent') 
+                        || finalPath.startsWith('/v1beta/models');
+                        
+    if (isGeminiNative) {
+      if (!finalPath.startsWith('/v1beta/')) {
+        finalPath = '/v1beta' + (finalPath.startsWith('/') ? '' : '/') + finalPath;
+      }
+    } else {
       const stripped = finalPath.replace(/^\/v1\//, '/');
-      finalPath = '/v1beta/openai' + stripped;
+      finalPath = '/v1beta/openai' + (stripped.startsWith('/') ? '' : '/') + stripped;
     }
 
     // ── Clean request body for OpenAI compatibility ──

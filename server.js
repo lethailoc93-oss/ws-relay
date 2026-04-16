@@ -289,7 +289,7 @@ const httpServer = createServer((req, res) => {
             // Clean headers — also strip authorization for same reason
             const headers = {};
             for (const [k, v] of Object.entries(req.headers)) {
-                if (!['host', 'connection', 'content-length', 'transfer-encoding', 'authorization'].includes(k.toLowerCase())) {
+                if (!['host', 'connection', 'content-length', 'transfer-encoding', 'authorization', 'x-goog-api-key'].includes(k.toLowerCase())) {
                     headers[k] = v;
                 }
             }
@@ -302,12 +302,21 @@ const httpServer = createServer((req, res) => {
             //   /models                   → /v1beta/openai/models
             // Mode 2 — Gemini native (Google AI Studio in SillyTavern):
             //   /v1beta/... paths pass through unchanged
+            //   /models/...:streamGenerateContent → prepends /v1beta
             let finalPath = apiPath;
-            const isGeminiNative = finalPath.startsWith('/v1beta/');
-            if (!isGeminiNative) {
+            const isGeminiNative = finalPath.includes(':streamGenerateContent') 
+                                || finalPath.includes(':generateContent') 
+                                || finalPath.startsWith('/v1beta/models');
+                                
+            if (isGeminiNative) {
+                // Ensure it starts with /v1beta/
+                if (!finalPath.startsWith('/v1beta/')) {
+                    finalPath = '/v1beta' + (finalPath.startsWith('/') ? '' : '/') + finalPath;
+                }
+            } else {
                 // OpenAI format → rewrite to Gemini OpenAI-compatible endpoint
                 const stripped = finalPath.replace(/^\/v1\//, '/');
-                finalPath = '/v1beta/openai' + stripped;
+                finalPath = '/v1beta/openai' + (stripped.startsWith('/') ? '' : '/') + stripped;
             }
 
             // ── Clean request body for Gemini OpenAI compatibility ──
