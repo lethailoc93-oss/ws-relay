@@ -162,7 +162,7 @@ function cleanGeminiBody(bodyStr) {
                 'stopSequences', 'responseMimeType', 'responseSchema',
                 'candidateCount', 'maxOutputTokens', 'temperature',
                 'topP', 'topK', 'presencePenalty', 'frequencyPenalty',
-                'responseLogprobs', 'logprobs', 'thinkingConfig', 'seed'
+                'responseLogprobs', 'logprobs', 'seed'
             ];
 
             for (const key of Object.keys(parsed.generationConfig)) {
