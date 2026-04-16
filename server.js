@@ -251,10 +251,12 @@ const httpServer = createServer((req, res) => {
     // Forwards HTTP request → proxy via WS → streams response back
     // Usage: SillyTavern → https://relay-url/api/ROOM_CODE/v1beta/models/...
     // ═══════════════════════════════════════════════
-    const apiMatch = req.url.match(/^\/api\/([a-zA-Z0-9_-]+)(\/.*)/);
+    // ═══════════════════════════════════════════════
+    const parsedUrl = new URL(req.url, `http://localhost:${PORT}`);
+    const apiMatch = parsedUrl.pathname.match(/^\/api\/([a-zA-Z0-9_-]+)(\/.*)/);
     if (apiMatch) {
         const roomCode = apiMatch[1];
-        const apiPath = apiMatch[2]; // e.g., /v1beta/models/gemini-2.0-flash:generateContent
+        const apiPath = apiMatch[2]; // e.g., /v1beta/models/gemini-2.0-flash:generateContent (without query string)
 
         // Check room & proxy
         const room = rooms.get(roomCode);
@@ -276,10 +278,9 @@ const httpServer = createServer((req, res) => {
         req.on('end', () => {
             const requestId = `bridge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-            // Parse URL for query params
-            const urlObj = new URL(req.url, `http://localhost:${PORT}`);
+            // Extract query params
             const queryParams = {};
-            urlObj.searchParams.forEach((v, k) => queryParams[k] = v);
+            parsedUrl.searchParams.forEach((v, k) => queryParams[k] = v);
 
             // ── Strip API key ──
             // SillyTavern "Google AI Studio" mode sends ?key=API_KEY
