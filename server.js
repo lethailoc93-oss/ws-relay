@@ -256,6 +256,16 @@ function handleBridgeResponse(msg) {
     return false;
 }
 
+// ── Debug Request Capture ────────────────────────
+// Circular buffer: last 5 requests per room for debugging
+const debugLog = new Map(); // roomCode → [{ts, method, originalPath, finalPath, queryParams, originalBody, cleanedBody, isGeminiNative}]
+function captureDebug(roomCode, entry) {
+    if (!debugLog.has(roomCode)) debugLog.set(roomCode, []);
+    const log = debugLog.get(roomCode);
+    log.push({ ts: new Date().toISOString(), ...entry });
+    if (log.length > 5) log.shift();
+}
+
 // ── HTTP Server ─────────────────────────────────
 const httpServer = createServer((req, res) => {
     // CORS headers
@@ -311,6 +321,16 @@ const httpServer = createServer((req, res) => {
             apps: appCount,
             status: proxyCount > 0 ? 'ready' : 'no_proxy'
         }));
+        return;
+    }
+
+    // Debug endpoint: /debug/ROOM_CODE — view last 5 captured requests
+    const debugMatch = req.url.match(/^\/debug\/([a-zA-Z0-9_-]+)/);
+    if (debugMatch) {
+        const code = debugMatch[1];
+        const entries = debugLog.get(code) || [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ room: code, requests: entries }, null, 2));
         return;
     }
 
@@ -421,6 +441,17 @@ const httpServer = createServer((req, res) => {
                 // Gemini native mode: strip unsupported fields
                 cleanBody = cleanGeminiBody(cleanBody);
             }
+
+            // Capture for debug endpoint
+            captureDebug(roomCode, {
+                method: req.method,
+                originalPath: apiPath,
+                finalPath,
+                queryParams,
+                isGeminiNative,
+                originalBody: body ? body.slice(0, 2000) : null,
+                cleanedBody: cleanBody ? cleanBody.slice(0, 2000) : null,
+            });
 
             // Build request spec (same format as WS app sends)
             const requestSpec = {
