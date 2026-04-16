@@ -294,6 +294,15 @@ const httpServer = createServer((req, res) => {
                 }
             }
 
+            // Guarantee an authorization header exists.
+            // The AI Studio frontend proxy script often looks for an existing
+            // authorization header to overwrite with its session OAuth token.
+            // ST's native Google API setting uses ?key= instead of headers,
+            // so we inject a dummy header here to trigger the proxy's injection.
+            if (!headers['authorization']) {
+                headers['authorization'] = 'Bearer temp-relay-trigger';
+            }
+
             // ── Path rewriting: OpenAI → Gemini ──
             // SillyTavern sends OpenAI-format paths, Gemini API uses different paths
             // /v1/chat/completions      → /v1beta/openai/chat/completions
