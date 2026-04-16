@@ -140,6 +140,64 @@ setInterval(() => {
   }
 }, HEARTBEAT_MS);
 
+// ── Clean Gemini Native Body ────────────────────
+function cleanGeminiBody(bodyStr) {
+    try {
+        const parsed = JSON.parse(bodyStr);
+        const allowedTopLevel = [
+            'contents', 'tools', 'toolConfig', 'safetySettings',
+            'systemInstruction', 'generationConfig', 'cachedContent'
+        ];
+
+        const removed = [];
+        for (const key of Object.keys(parsed)) {
+            if (!allowedTopLevel.includes(key)) {
+                removed.push(key);
+                delete parsed[key];
+            }
+        }
+
+        if (parsed.generationConfig) {
+            const allowedGenConfig = [
+                'stopSequences', 'responseMimeType', 'responseSchema',
+                'candidateCount', 'maxOutputTokens', 'temperature',
+                'topP', 'topK', 'presencePenalty', 'frequencyPenalty',
+                'responseLogprobs', 'logprobs', 'thinkingConfig', 'seed'
+            ];
+
+            for (const key of Object.keys(parsed.generationConfig)) {
+                if (!allowedGenConfig.includes(key)) {
+                    removed.push(`generationConfig.${key}`);
+                    delete parsed.generationConfig[key];
+                }
+            }
+
+            if (parsed.generationConfig.topK === 0) {
+                removed.push('generationConfig.topK=0');
+                delete parsed.generationConfig.topK;
+            }
+
+            if (parsed.generationConfig.candidateCount > 1) {
+                parsed.generationConfig.candidateCount = 1;
+                removed.push('generationConfig.candidateCount→1');
+            }
+
+            if (Array.isArray(parsed.generationConfig.stopSequences) && parsed.generationConfig.stopSequences.length === 0) {
+                delete parsed.generationConfig.stopSequences;
+            }
+        }
+
+        if (removed.length > 0) {
+            log(`[Gemini Clean] Removed: ${removed.join(', ')}`);
+        }
+
+        log(`[Gemini Clean] contents=${parsed.contents?.length || 0} systemInstruction=${!!parsed.systemInstruction} safety=${parsed.safetySettings?.length || 0}`);
+        return JSON.stringify(parsed);
+    } catch {
+        return bodyStr;
+    }
+}
+
 // ── HTTP Server ─────────────────────────────────
 const server = http.createServer((req, res) => {
   // CORS preflight
@@ -223,9 +281,10 @@ const server = http.createServer((req, res) => {
       }
     }
 
-    // ── Clean request body for OpenAI compatibility ──
+    // ── Clean request body ──
     let cleanBody = body || null;
     if (cleanBody && finalPath.includes('/chat/completions')) {
+      // OpenAI mode: strip unsupported params
       try {
         const parsed = JSON.parse(cleanBody);
         const allowed = [
@@ -247,6 +306,9 @@ const server = http.createServer((req, res) => {
         cleanBody = JSON.stringify(parsed);
         log(`[OpenAI] Cleaned body: model=${parsed.model} stream=${parsed.stream} messages=${parsed.messages?.length}`);
       } catch { /* keep original body */ }
+    } else if (cleanBody && isGeminiNative) {
+      // Gemini native mode: strip unsupported fields
+      cleanBody = cleanGeminiBody(cleanBody);
     }
 
     const requestSpec = {

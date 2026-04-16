@@ -129,6 +129,74 @@ function detectRoleFromMessage(msg) {
     return null;
 }
 
+// ── Clean Gemini Native Body ────────────────────
+// SillyTavern sends extra params that Gemini API rejects as "invalid argument"
+function cleanGeminiBody(bodyStr) {
+    try {
+        const parsed = JSON.parse(bodyStr);
+
+        // Allowed top-level fields for generateContent / streamGenerateContent
+        const allowedTopLevel = [
+            'contents', 'tools', 'toolConfig', 'safetySettings',
+            'systemInstruction', 'generationConfig', 'cachedContent'
+        ];
+
+        const removed = [];
+        for (const key of Object.keys(parsed)) {
+            if (!allowedTopLevel.includes(key)) {
+                removed.push(key);
+                delete parsed[key];
+            }
+        }
+
+        // Clean generationConfig
+        if (parsed.generationConfig) {
+            const allowedGenConfig = [
+                'stopSequences', 'responseMimeType', 'responseSchema',
+                'candidateCount', 'maxOutputTokens', 'temperature',
+                'topP', 'topK', 'presencePenalty', 'frequencyPenalty',
+                'responseLogprobs', 'logprobs', 'thinkingConfig', 'seed'
+            ];
+
+            for (const key of Object.keys(parsed.generationConfig)) {
+                if (!allowedGenConfig.includes(key)) {
+                    removed.push(`generationConfig.${key}`);
+                    delete parsed.generationConfig[key];
+                }
+            }
+
+            // topK=0 is invalid for most models
+            if (parsed.generationConfig.topK === 0) {
+                removed.push('generationConfig.topK=0');
+                delete parsed.generationConfig.topK;
+            }
+
+            // candidateCount > 1 not supported for streaming
+            if (parsed.generationConfig.candidateCount > 1) {
+                parsed.generationConfig.candidateCount = 1;
+                removed.push('generationConfig.candidateCount→1');
+            }
+
+            // Remove empty stopSequences array (can cause issues)
+            if (Array.isArray(parsed.generationConfig.stopSequences) && parsed.generationConfig.stopSequences.length === 0) {
+                delete parsed.generationConfig.stopSequences;
+            }
+        }
+
+        if (removed.length > 0) {
+            console.log(`[Gemini Clean] Removed: ${removed.join(', ')}`);
+        }
+
+        const contentCount = parsed.contents?.length || 0;
+        const hasSystem = !!parsed.systemInstruction;
+        console.log(`[Gemini Clean] contents=${contentCount} systemInstruction=${hasSystem} safetySettings=${parsed.safetySettings?.length || 0}`);
+
+        return JSON.stringify(parsed);
+    } catch {
+        return bodyStr;
+    }
+}
+
 // ── HTTP-to-WS Bridge ───────────────────────────
 // Pending HTTP requests waiting for proxy response
 // Map<request_id, { res, status, headersSent, timer }>
@@ -324,10 +392,10 @@ const httpServer = createServer((req, res) => {
                 }
             }
 
-            // ── Clean request body for Gemini OpenAI compatibility ──
-            // SillyTavern sends extra params (min_p, repetition_penalty) that Gemini rejects
+            // ── Clean request body ──
             let cleanBody = body || null;
             if (cleanBody && finalPath.includes('/chat/completions')) {
+                // OpenAI mode: strip unsupported params (min_p, repetition_penalty, etc.)
                 try {
                     const parsed = JSON.parse(cleanBody);
                     const allowed = [
@@ -337,20 +405,21 @@ const httpServer = createServer((req, res) => {
                         'tools', 'tool_choice'
                     ];
                     
-                    // Strip any key not in allowed list
                     for (const key of Object.keys(parsed)) {
                         if (!allowed.includes(key)) {
                             delete parsed[key];
                         }
                     }
                     
-                    // Gemini prefers max_completion_tokens; remove duplicate
                     if (parsed.max_completion_tokens && parsed.max_tokens) {
                         delete parsed.max_tokens;
                     }
                     cleanBody = JSON.stringify(parsed);
                     console.log(`[Bridge] Cleaned OpenAI body: model=${parsed.model} stream=${parsed.stream} messages=${parsed.messages?.length}`);
                 } catch { /* keep original body */ }
+            } else if (cleanBody && isGeminiNative) {
+                // Gemini native mode: strip unsupported fields
+                cleanBody = cleanGeminiBody(cleanBody);
             }
 
             // Build request spec (same format as WS app sends)
