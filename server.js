@@ -316,8 +316,12 @@ const httpServer = createServer((req, res) => {
                 }
             } else {
                 // OpenAI format → rewrite to Gemini OpenAI-compatible endpoint
-                const stripped = finalPath.replace(/^\/v1\//, '/');
-                finalPath = '/v1beta/openai' + (stripped.startsWith('/') ? '' : '/') + stripped;
+                let stripped = finalPath.replace(/^\/v1\//, '/');
+                if (!stripped.startsWith('/v1beta/openai')) {
+                    finalPath = '/v1beta/openai' + (stripped.startsWith('/') ? '' : '/') + stripped;
+                } else {
+                    finalPath = stripped;
+                }
             }
 
             // ── Clean request body for Gemini OpenAI compatibility ──
