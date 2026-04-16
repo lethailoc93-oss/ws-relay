@@ -278,13 +278,7 @@ const httpServer = createServer((req, res) => {
             // Parse URL for query params
             const urlObj = new URL(req.url, `http://localhost:${PORT}`);
             const queryParams = {};
-            urlObj.searchParams.forEach((v, k) => {
-                // Strip the "key" parameter to prevent Google API 400 Invalid Argument
-                // since AI Studio proxy uses internal session auth, not API keys.
-                if (k.toLowerCase() !== 'key') {
-                    queryParams[k] = v;
-                }
-            });
+            urlObj.searchParams.forEach((v, k) => queryParams[k] = v);
 
             // Clean headers
             const headers = {};
@@ -292,15 +286,6 @@ const httpServer = createServer((req, res) => {
                 if (!['host', 'connection', 'content-length', 'transfer-encoding'].includes(k.toLowerCase())) {
                     headers[k] = v;
                 }
-            }
-
-            // Guarantee an authorization header exists.
-            // The AI Studio frontend proxy script often looks for an existing
-            // authorization header to overwrite with its session OAuth token.
-            // ST's native Google API setting uses ?key= instead of headers,
-            // so we inject a dummy header here to trigger the proxy's injection.
-            if (!headers['authorization']) {
-                headers['authorization'] = 'Bearer temp-relay-trigger';
             }
 
             // ── Path rewriting: OpenAI → Gemini ──
