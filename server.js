@@ -278,7 +278,13 @@ const httpServer = createServer((req, res) => {
             // Parse URL for query params
             const urlObj = new URL(req.url, `http://localhost:${PORT}`);
             const queryParams = {};
-            urlObj.searchParams.forEach((v, k) => queryParams[k] = v);
+            urlObj.searchParams.forEach((v, k) => {
+                // Strip the "key" parameter to prevent Google API 400 Invalid Argument
+                // since AI Studio proxy uses internal session auth, not API keys.
+                if (k.toLowerCase() !== 'key') {
+                    queryParams[k] = v;
+                }
+            });
 
             // Clean headers
             const headers = {};
