@@ -211,6 +211,31 @@ function handleBridgeResponse(msg) {
     console.log(`[Bridge Response] ${msg.request_id?.slice(0,20)} event=${msg.event_type} found=${!!pending} pending_count=${httpBridgeRequests.size}`);
     if (!pending) return false;
 
+    // Capture error responses for debugging
+    if (msg.event_type === 'error' || (msg.event_type === 'chunk' && msg.data)) {
+        const roomCode = msg.request_id?.match(/bridge-\d+-([a-z0-9]+)/)?.[1] || 'unknown';
+        // Try to extract error from chunk data (Gemini sends errors as response body)
+        if (msg.event_type === 'chunk' && msg.data) {
+            try {
+                const chunkData = JSON.parse(msg.data);
+                if (chunkData.error) {
+                    captureDebug(roomCode + '_errors', {
+                        request_id: msg.request_id,
+                        error: chunkData.error,
+                        status: msg.status,
+                    });
+                }
+            } catch { /* not JSON error */ }
+        }
+        if (msg.event_type === 'error') {
+            captureDebug(roomCode + '_errors', {
+                request_id: msg.request_id,
+                error: msg.message,
+                status: msg.status,
+            });
+        }
+    }
+
     switch (msg.event_type) {
         case 'response_headers':
             pending.status = msg.status || 200;
@@ -442,15 +467,33 @@ const httpServer = createServer((req, res) => {
                 cleanBody = cleanGeminiBody(cleanBody);
             }
 
-            // Capture for debug endpoint
+            // Analyze body structure for debug (don't store raw body - too large)
+            let bodyAnalysis = null;
+            if (body) {
+                try {
+                    const p = JSON.parse(body);
+                    bodyAnalysis = {
+                        topLevelKeys: Object.keys(p),
+                        bodyLength: body.length,
+                        contentsCount: p.contents?.length,
+                        contentsRoles: p.contents?.map(c => c.role),
+                        contentsSizes: p.contents?.map(c => JSON.stringify(c).length),
+                        hasGenerationConfig: !!p.generationConfig,
+                        generationConfigKeys: p.generationConfig ? Object.keys(p.generationConfig) : null,
+                        hasSafetySettings: !!p.safetySettings,
+                        safetyCount: p.safetySettings?.length,
+                        hasSystemInstruction: !!p.systemInstruction,
+                    };
+                } catch { bodyAnalysis = { raw: body.slice(0, 500), parseError: true }; }
+            }
             captureDebug(roomCode, {
                 method: req.method,
                 originalPath: apiPath,
                 finalPath,
                 queryParams,
                 isGeminiNative,
-                originalBody: body ? body.slice(0, 2000) : null,
-                cleanedBody: cleanBody ? cleanBody.slice(0, 2000) : null,
+                bodyAnalysis,
+                cleanedBodyLength: cleanBody?.length,
             });
 
             // Build request spec (same format as WS app sends)
