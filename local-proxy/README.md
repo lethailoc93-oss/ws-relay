@@ -24,7 +24,8 @@
 2. Ấn phím `F12` (hoặc chuột phải -> Kiểm tra / Inspect) để mở **Developer Tools**.
 3. Chuyển sang tab **Console**.
 4. Mở file `dark-browser.js` bằng Notepad. Copy **toàn bộ nội dung** trong đó.
-5. Paste vào **Console** của trình duyệt và nhấn `Enter`.
+5. Paste vào **Console** của trình duyệt và nhấn `Enter`. 
+   > 💡 **Lưu ý:** Nếu trình duyệt hiện cảnh báo màu vàng và KHÔNG cho bạn Paste. Hãy gõ chữ `allow pasting` vào Console, nhấn Enter. Sau đó bạn sẽ Paste được bình thường (chỉ cần làm 1 lần duy nhất).
 6. Nếu thấy báo `✅ Browser proxy agent started` và `[Connection] Connected`, bạn đã thành công! Cứ để tab Google Studio đó mở.
 
 ### Bước 3: Cấu hình trong SillyTavern
