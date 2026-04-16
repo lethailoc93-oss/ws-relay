@@ -208,38 +208,20 @@ const httpBridgeRequests = new Map();
  */
 function handleBridgeResponse(msg) {
     const pending = httpBridgeRequests.get(msg.request_id);
-    console.log(`[Bridge Response] ${msg.request_id?.slice(0,20)} event=${msg.event_type} found=${!!pending} pending_count=${httpBridgeRequests.size}`);
+    console.log(`[Bridge Response] ${msg.request_id?.slice(0,20)} event=${msg.event_type} status=${msg.status} found=${!!pending} pending_count=${httpBridgeRequests.size}`);
     if (!pending) return false;
 
-    // Capture error responses for debugging
-    if (msg.event_type === 'error' || (msg.event_type === 'chunk' && msg.data)) {
-        const roomCode = msg.request_id?.match(/bridge-\d+-([a-z0-9]+)/)?.[1] || 'unknown';
-        // Try to extract error from chunk data (Gemini sends errors as response body)
-        if (msg.event_type === 'chunk' && msg.data) {
-            try {
-                const chunkData = JSON.parse(msg.data);
-                if (chunkData.error) {
-                    captureDebug(roomCode + '_errors', {
-                        request_id: msg.request_id,
-                        error: chunkData.error,
-                        status: msg.status,
-                    });
-                }
-            } catch { /* not JSON error */ }
-        }
-        if (msg.event_type === 'error') {
-            captureDebug(roomCode + '_errors', {
-                request_id: msg.request_id,
-                error: msg.message,
-                status: msg.status,
-            });
-        }
-    }
+    // Use roomCode stored in pending request
+    const rc = pending.roomCode || 'unknown';
 
     switch (msg.event_type) {
         case 'response_headers':
             pending.status = msg.status || 200;
             pending.respHeaders = msg.headers || {};
+            // Capture non-200 status
+            if (pending.status >= 400) {
+                console.log(`[Bridge] ⚠️ Error status ${pending.status} for ${msg.request_id}`);
+            }
             return true;
 
         case 'chunk':
@@ -251,10 +233,31 @@ function handleBridgeResponse(msg) {
                     'Access-Control-Allow-Origin': '*',
                 });
             }
+            // Capture error responses (status >= 400 or error in body)
+            if (!pending.errorCaptured) {
+                try {
+                    const chunkData = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
+                    if (chunkData.error || (pending.status && pending.status >= 400)) {
+                        pending.errorCaptured = true;
+                        captureDebug(rc + '_errors', {
+                            request_id: msg.request_id,
+                            httpStatus: pending.status,
+                            error: chunkData.error || chunkData,
+                            dataPreview: typeof msg.data === 'string' ? msg.data.slice(0, 1000) : null,
+                        });
+                    }
+                } catch { /* not JSON */ }
+            }
             pending.res.write(msg.data);
             return true;
 
         case 'stream_close':
+            // Log completion with status
+            captureDebug(rc + '_responses', {
+                request_id: msg.request_id,
+                httpStatus: pending.status || 200,
+                hadError: pending.errorCaptured || false,
+            });
             if (!pending.headersSent) {
                 pending.res.writeHead(pending.status || 200, {
                     'Content-Type': 'application/json',
@@ -267,6 +270,12 @@ function handleBridgeResponse(msg) {
             return true;
 
         case 'error':
+            captureDebug(rc + '_errors', {
+                request_id: msg.request_id,
+                error: msg.message,
+                status: msg.status,
+                eventType: 'error',
+            });
             if (!pending.headersSent) {
                 pending.res.writeHead(msg.status || 500, {
                     'Content-Type': 'application/json',
@@ -519,6 +528,7 @@ const httpServer = createServer((req, res) => {
             }, 5 * 60 * 1000);
 
             httpBridgeRequests.set(requestId, {
+                roomCode,
                 res,
                 status: 200,
                 respHeaders: {},
