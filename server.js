@@ -1,6 +1,7 @@
 // ================================================
-// WebSocket Relay Server v2.1 — Mobile Resilience — Optimized Cloud Deploy
+// WebSocket Relay Server v2.5 — Multi-API Support
 // Routes messages between VietTruyen App ↔ Gemini Browser Proxy
+// Supports: Custom OpenAI-compatible + Google AI Studio (Gemini native)
 // Improvements: role-based pairing, compression, chunk batching,
 //               smart keepalive, message limits, metrics
 // Deploy: Render.com (Free Tier optimized)
@@ -208,7 +209,7 @@ const httpServer = createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             status: 'ok',
-            version: '2.3.0',
+            version: '2.5.0',
             uptime,
             rooms: rooms.size,
             connections: totalClients,
@@ -280,24 +281,31 @@ const httpServer = createServer((req, res) => {
             const queryParams = {};
             urlObj.searchParams.forEach((v, k) => queryParams[k] = v);
 
-            // Clean headers
+            // ── Strip API key ──
+            // SillyTavern "Google AI Studio" mode sends ?key=API_KEY
+            // Proxy already has OAuth — strip to avoid conflicts
+            delete queryParams.key;
+
+            // Clean headers — also strip authorization for same reason
             const headers = {};
             for (const [k, v] of Object.entries(req.headers)) {
-                if (!['host', 'connection', 'content-length', 'transfer-encoding'].includes(k.toLowerCase())) {
+                if (!['host', 'connection', 'content-length', 'transfer-encoding', 'authorization'].includes(k.toLowerCase())) {
                     headers[k] = v;
                 }
             }
 
-            // ── Path rewriting: OpenAI → Gemini ──
-            // SillyTavern sends OpenAI-format paths, Gemini API uses different paths
-            // /v1/chat/completions      → /v1beta/openai/chat/completions
-            // /v1/models                → /v1beta/openai/models
-            // /chat/completions         → /v1beta/openai/chat/completions
-            // /models                   → /v1beta/openai/models
-            // /v1beta/... paths pass through unchanged (already Gemini-native)
+            // ── Path rewriting: Auto-detect API format ──
+            // Mode 1 — OpenAI-compatible (Custom OpenAI in SillyTavern):
+            //   /v1/chat/completions      → /v1beta/openai/chat/completions
+            //   /v1/models                → /v1beta/openai/models
+            //   /chat/completions         → /v1beta/openai/chat/completions
+            //   /models                   → /v1beta/openai/models
+            // Mode 2 — Gemini native (Google AI Studio in SillyTavern):
+            //   /v1beta/... paths pass through unchanged
             let finalPath = apiPath;
-            if (!finalPath.startsWith('/v1beta/')) {
-                // Strip /v1 prefix if present
+            const isGeminiNative = finalPath.startsWith('/v1beta/');
+            if (!isGeminiNative) {
+                // OpenAI format → rewrite to Gemini OpenAI-compatible endpoint
                 const stripped = finalPath.replace(/^\/v1\//, '/');
                 finalPath = '/v1beta/openai' + stripped;
             }
@@ -326,7 +334,7 @@ const httpServer = createServer((req, res) => {
                         delete parsed.max_tokens;
                     }
                     cleanBody = JSON.stringify(parsed);
-                    console.log(`[Bridge] Cleaned body: model=${parsed.model} stream=${parsed.stream} messages=${parsed.messages?.length}`);
+                    console.log(`[Bridge] Cleaned OpenAI body: model=${parsed.model} stream=${parsed.stream} messages=${parsed.messages?.length}`);
                 } catch { /* keep original body */ }
             }
 
@@ -367,7 +375,8 @@ const httpServer = createServer((req, res) => {
             metrics.messagesRelayed++;
             metrics.bytesRelayed += msgStr.length;
 
-            console.log(`[HTTP Bridge] ${requestId} → ${req.method} ${finalPath}${finalPath !== apiPath ? ` (rewritten from ${apiPath})` : ''} (room: ${roomCode}) | pending=${httpBridgeRequests.size}`);
+            const mode = isGeminiNative ? 'AI-Studio' : 'OpenAI';
+            console.log(`[HTTP Bridge] ${requestId} → ${req.method} ${finalPath} [${mode}]${finalPath !== apiPath ? ` (from ${apiPath})` : ''} (room: ${roomCode}) | pending=${httpBridgeRequests.size}`);
         });
 
         // Handle client disconnect
@@ -622,8 +631,9 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // ── Start ───────────────────────────────────────
 httpServer.listen(PORT, () => {
-    console.log(`🔌 WS Relay Server v2.1.0 running on port ${PORT}`);
+    console.log(`🔌 WS Relay Server v2.5.0 running on port ${PORT}`);
     console.log(`   Health check: http://localhost:${PORT}/health`);
+    console.log(`   API modes: Custom OpenAI-compatible + Google AI Studio (Gemini native)`);
     console.log(`   Features: role-pairing, compression, chunk-batching, smart-keepalive`);
     console.log(`   Max message: ${MAX_MESSAGE_SIZE / 1024 / 1024}MB | Ping: ${PING_INTERVAL_MS / 1000}s`);
 });

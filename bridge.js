@@ -3,10 +3,15 @@
 // HTTP-to-WebSocket Bridge for SillyTavern
 // Nhận HTTP request → chuyển qua WS Relay → Proxy App → Gemini API
 //
+// Hỗ trợ 2 mode:
+//   1. Custom (OpenAI-compatible) → auto-rewrite path to Gemini
+//   2. Google AI Studio → pass-through Gemini native paths
+//
 // Cách dùng:
 //   node bridge.js
 //   → Server chạy tại http://localhost:5001
 //   → SillyTavern trỏ Custom OpenAI URL: http://localhost:5001
+//   → HOẶC Google AI Studio URL:  http://localhost:5001
 //
 // Yêu cầu:
 //   1. AI Studio Proxy App đang mở và kết nối WS Relay
@@ -174,25 +179,67 @@ const server = http.createServer((req, res) => {
     }
 
     const requestId = crypto.randomUUID();
-    const path = req.url; // e.g. /v1beta/models/gemini-2.0-flash:generateContent
     const headers = { ...req.headers };
-    // Remove hop-by-hop headers
+    // Remove hop-by-hop headers + authorization (proxy has OAuth)
     delete headers.host;
     delete headers.connection;
     delete headers['content-length'];
     delete headers['transfer-encoding'];
+    delete headers['authorization'];
 
-    // Parse query params
+    // Parse URL and query params
     const urlObj = new URL(req.url, `http://localhost:${PORT}`);
     const queryParams = {};
     urlObj.searchParams.forEach((v, k) => queryParams[k] = v);
 
+    // ── Strip API key ──
+    // SillyTavern "Google AI Studio" mode sends ?key=API_KEY
+    // Proxy already has OAuth — strip to avoid conflicts
+    delete queryParams.key;
+
+    // ── Path rewriting: Auto-detect API format ──
+    // Mode 1 — OpenAI-compatible:
+    //   /v1/chat/completions  → /v1beta/openai/chat/completions
+    //   /v1/models            → /v1beta/openai/models
+    // Mode 2 — Gemini native (Google AI Studio):
+    //   /v1beta/... paths pass through unchanged
+    let finalPath = urlObj.pathname;
+    const isGeminiNative = finalPath.startsWith('/v1beta/');
+    if (!isGeminiNative) {
+      const stripped = finalPath.replace(/^\/v1\//, '/');
+      finalPath = '/v1beta/openai' + stripped;
+    }
+
+    // ── Clean request body for OpenAI compatibility ──
+    let cleanBody = body || null;
+    if (cleanBody && finalPath.includes('/chat/completions')) {
+      try {
+        const parsed = JSON.parse(cleanBody);
+        const unsupported = [
+          'logit_bias', 'logprobs', 'top_logprobs',
+          'user', 'service_tier', 'store',
+          'frequency_penalty', 'presence_penalty',
+          'seed', 'tools', 'tool_choice',
+          'response_format', 'extra_body',
+          'n', 'suffix'
+        ];
+        for (const key of unsupported) {
+          delete parsed[key];
+        }
+        if (parsed.max_completion_tokens && parsed.max_tokens) {
+          delete parsed.max_tokens;
+        }
+        cleanBody = JSON.stringify(parsed);
+        log(`[OpenAI] Cleaned body: model=${parsed.model} stream=${parsed.stream} messages=${parsed.messages?.length}`);
+      } catch { /* keep original body */ }
+    }
+
     const requestSpec = {
       request_id: requestId,
       method: req.method,
-      path: urlObj.pathname,
+      path: finalPath,
       headers,
-      body: body || null,
+      body: cleanBody,
       query_params: queryParams,
     };
 
@@ -206,7 +253,8 @@ const server = http.createServer((req, res) => {
 
     // Send through WS
     ws.send(JSON.stringify(requestSpec));
-    log(`📤 ${requestId.slice(0, 8)} → ${req.method} ${urlObj.pathname}`);
+    const mode = isGeminiNative ? 'AI-Studio' : 'OpenAI';
+    log(`📤 ${requestId.slice(0, 8)} → ${req.method} ${finalPath} [${mode}]${finalPath !== urlObj.pathname ? ` (from ${urlObj.pathname})` : ''}`);
 
     // Timeout 5 min
     setTimeout(() => {
@@ -230,10 +278,15 @@ server.listen(PORT, () => {
   log(`📡 Relay: ${WS_RELAY} | Room: ${ROOM_CODE}`);
   log(`🌐 http://localhost:${PORT}`);
   log('');
-  log('SillyTavern config:');
-  log(`  API: "Custom (OpenAI-compatible)" hoặc "Google AI Studio"`);
+  log('SillyTavern config (chọn 1 trong 2):');
+  log('  ─── Mode 1: Custom (OpenAI-compatible) ───');
+  log(`  API: "Custom (OpenAI-compatible)"`);
   log(`  Base URL: http://localhost:${PORT}`);
   log(`  API Key: (nhập bất kỳ)`);
+  log('  ─── Mode 2: Google AI Studio ───');
+  log(`  API: "Chat Completion" → Nguồn: "Google AI Studio"`);
+  log(`  Base URL: http://localhost:${PORT}`);
+  log(`  API Key: (nhập bất kỳ — sẽ bị strip)`);
   log('='.repeat(50));
   connectWS();
 });
